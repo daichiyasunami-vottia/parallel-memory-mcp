@@ -19,7 +19,7 @@ from typing import Any
 from . import __version__
 from .store import OUTCOMES, Store
 from .graphify_sync import export as graphify_export, import_dir as graphify_import
-from . import claude_sync, codex_sync
+from . import claude_sync, codex_sync, team
 from .writer import repo_root
 
 TOOLS: list[dict[str, Any]] = [
@@ -82,6 +82,19 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "sync_team",
+        "description": "Import observations teammates committed to the shared "
+                       "directory, then export this store's own. The directory is "
+                       "text, one file per observation, safe to commit.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "directory": {"type": "string", "default": "agent-memory"},
+                "commit": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    {
         "name": "sync_codex",
         "description": "Import Codex's distilled memories "
                        "($CODEX_HOME/memories_*.sqlite) into this store. Read-only "
@@ -132,6 +145,9 @@ def dispatch(store: Store, name: str, args: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("not inside a git repository; pass repo_root")
         return claude_sync.sync(store, root,
                                 write_back=bool(args.get("write_back", True)))
+    if name == "sync_team":
+        return team.sync(store, args.get("directory"),
+                         commit=bool(args.get("commit", False)))
     if name == "sync_codex":
         result = codex_sync.sync(store, db_path=args.get("db_path"))
         target = args.get("agents_memory_path")
@@ -213,8 +229,38 @@ async def run_stdio(store: Store) -> None:
         await server.run(read, write, server.create_initialization_options())
 
 
+class _ApiKeyGate:
+    """Reject requests without the shared key, before the MCP session starts.
+
+    A team server is reachable by anything that can open the port, so the key
+    is checked in ASGI rather than per-tool. Constant-time compare, because the
+    key is a secret and the check is on an open port.
+    """
+
+    def __init__(self, app, api_key: str):
+        self.app = app
+        self.api_key = api_key
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = dict(scope.get("headers") or [])
+        supplied = headers.get(b"authorization", b"").decode("latin-1")
+        if supplied.lower().startswith("bearer "):
+            supplied = supplied[7:]
+        if not supplied:
+            supplied = headers.get(b"x-api-key", b"").decode("latin-1")
+        import hmac
+        if not hmac.compare_digest(supplied, self.api_key):
+            await send({"type": "http.response.start", "status": 401,
+                        "headers": [(b"content-type", b"text/plain")]})
+            await send({"type": "http.response.body", "body": b"unauthorized"})
+            return
+        await self.app(scope, receive, send)
+
+
 def run_http(store: Store, host: str = "127.0.0.1", port: int = 8931,
-             path: str = "/mcp") -> None:
+             path: str = "/mcp", api_key: str | None = None) -> None:
     import uvicorn
     from starlette.applications import Starlette
     from starlette.routing import Mount
@@ -233,5 +279,6 @@ def run_http(store: Store, host: str = "127.0.0.1", port: int = 8931,
         async with manager.run():
             yield
 
-    app = Starlette(routes=[Mount(path, app=handle)], lifespan=lifespan)
+    endpoint = _ApiKeyGate(handle, api_key) if api_key else handle
+    app = Starlette(routes=[Mount(path, app=endpoint)], lifespan=lifespan)
     uvicorn.run(app, host=host, port=port)

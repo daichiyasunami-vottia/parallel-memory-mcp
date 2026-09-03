@@ -132,6 +132,7 @@ parallel-memory serve --http --port 8931
 | `writers` | list contributing writers with counts |
 | `sync_claude` | fold Claude Code's per-worktree auto-memory into the store and write the union back to every worktree |
 | `sync_codex` | import Codex's distilled memories (read-only), optionally writing the markdown surface |
+| `sync_team` | import observations teammates committed, then export this store's own |
 | `sync_graphify` | absorb existing `graphify-out/memory/*.md`, then mirror the store back into it |
 
 `outcome` is one of `useful` / `dead_end` / `corrected` — the same vocabulary
@@ -247,6 +248,46 @@ stdin is closed, because these CLIs read a piped stdin as extra prompt input.
 
 Working agreements for agents live in [AGENTS.md](AGENTS.md), which Codex,
 Cursor and Gemini CLI read directly and `CLAUDE.md` points at.
+
+## Sharing with a team
+
+SQLite cannot be merged, so the store stays local and ignored. What gets
+committed is the text export — one markdown file per observation, named with the
+writer and the observation's UUID:
+
+```
+agent-memory/
+  query_20260903T051507_alice_9c7e2564_how_does_auth_work.md
+  query_20260903T051509_bob_1f0ab233_how_does_auth_work.md
+```
+
+**No merge driver is needed, because no path is ever written by two people.**
+The writer and a UUID are both in the filename, so a pull only ever adds files;
+git never has to reconcile the contents of one. Nothing is rewritten in place
+either, so the directory is append-only.
+
+```bash
+parallel-memory team sync                 # absorb teammates', publish ours
+parallel-memory team sync --commit        # and commit the result
+parallel-memory team hooks                # re-import automatically after a pull
+```
+
+`team hooks` appends to `post-merge` and `post-checkout` — it does not replace an
+existing hook, and it is a no-op if already installed. Commit `agent-memory/`;
+keep `.parallel-memory/` (the SQLite cache) ignored.
+
+The alternative is one shared server, which needs a key on an open port:
+
+```bash
+parallel-memory serve --http --host 0.0.0.0 --port 8931 --api-key "$SECRET"
+```
+
+Clients send `Authorization: Bearer $SECRET` or `X-API-Key: $SECRET`. The check
+is a constant-time compare in ASGI, before the MCP session starts.
+
+Which to pick is the tradeoff this repository is about: the git route is
+reviewable and needs no operations, the server route gives one authoritative
+copy and real queries.
 
 ## Scope
 

@@ -59,6 +59,9 @@ def render_doc(obs: dict[str, Any]) -> str:
         f'date: "{obs["created_at"]}"',
         f'question: "{yaml_str(obs["question"])}"',
         f'contributor: "{yaml_str(obs["writer"])}"',
+        # graphify's parser ignores keys it does not know, so carrying the id
+        # here keeps a re-import exact without changing what graphify reads.
+        f'memory_id: "{yaml_str(obs["id"])}"',
     ]
     if obs.get("outcome"):
         lines.append(f'outcome: "{yaml_str(obs["outcome"])}"')
@@ -115,7 +118,7 @@ def parse_doc(text: str) -> dict[str, Any] | None:
             continue
         m = _SCALAR_RE.match(line)
         if m and m.group(1) in ("type", "date", "question", "outcome",
-                                "correction", "contributor"):
+                                "correction", "contributor", "memory_id"):
             fields[m.group(1)] = _unescape(m.group(2))
     return fields
 

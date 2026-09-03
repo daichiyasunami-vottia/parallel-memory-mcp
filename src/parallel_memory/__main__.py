@@ -20,6 +20,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--http", action="store_true", help="streamable HTTP instead of stdio")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8931)
+    s.add_argument("--api-key", default=None,
+                   help="require this key on the HTTP transport (Bearer or X-API-Key)")
 
     sub.add_parser("status", help="show where the store is and who has written")
 
@@ -38,6 +40,14 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--cwd", default=None)
 
     sub.add_parser("backends", help="list agent backends found on this machine")
+
+    t = sub.add_parser("team", help="share observations with a team over git")
+    tsub = t.add_subparsers(dest="team_cmd", required=True)
+    ts = tsub.add_parser("sync", help="import teammates' observations, export ours")
+    ts.add_argument("--dir", default=None, help="default: <repo>/agent-memory")
+    ts.add_argument("--commit", action="store_true", help="git commit the result")
+    th = tsub.add_parser("hooks", help="install git hooks that re-import after pull")
+    th.add_argument("--dir", default=None)
 
     x = sub.add_parser("sync-codex", help="import Codex's distilled memories (read-only)")
     x.add_argument("--db", dest="codex_db", default=None)
@@ -58,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "serve":
         from . import server
         if args.http:
-            server.run_http(store, args.host, args.port)
+            server.run_http(store, args.host, args.port, api_key=args.api_key)
         else:
             asyncio.run(server.run_stdio(store))
         return 0
@@ -101,6 +111,17 @@ def main(argv: list[str] | None = None) -> int:
                            "output": r.output} for r in results],
                          ensure_ascii=False, indent=2))
         return 0 if all(r.ok for r in results) else 1
+
+    if args.cmd == "team":
+        from . import team as team_mod
+        if args.team_cmd == "sync":
+            print(json.dumps(team_mod.sync(store, args.dir, commit=args.commit),
+                             ensure_ascii=False, indent=2))
+            return 0
+        installed = team_mod.install_hooks(directory=args.dir)
+        print(json.dumps({"installed": [str(p) for p in installed]}, indent=2)
+              if installed else "hooks already installed")
+        return 0
 
     if args.cmd == "sync-codex":
         from . import codex_sync
