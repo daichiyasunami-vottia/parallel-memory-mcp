@@ -1,0 +1,252 @@
+# parallel-memory-mcp
+
+A memory MCP server for agents that run in parallel — and a benchmark showing
+what the alternatives lose when they do.
+
+Writes are serialised by SQLite, not by luck. Observations are mirrored into
+[graphify](https://github.com/Graphify-Labs/graphify) memory docs, so
+`graphify --update` and `graphify reflect` read them with no changes on their side.
+
+## The measurement
+
+Twenty writes issued at once. `kept` is how many survived; every store reported
+success for all twenty, and none raised.
+
+| case | `@modelcontextprotocol/server-memory` | graphify memory docs | this repo |
+|---|---|---|---|
+| 20 writes, strictly one at a time | 20 / 20 | — | 20 / 20 |
+| 20 **distinct** writes at once | **1 / 20** | 20 / 20 | 20 / 20 |
+| same question, same instant | **1 / 20** | **1 / 20** | 20 / 20 |
+| questions sharing a 50-char prefix | — | **1 / 20** | 20 / 20 |
+| error responses / raised exceptions | 0 | 0 | 0 |
+
+Reproduce it yourself — see [`bench/`](bench/).
+
+### Why each number comes out that way
+
+**server-memory** (v2026.8.31) loses almost everything the moment writes
+overlap. Every mutation is a whole-graph read-modify-write:
+
+```js
+async createEntities(entities) {
+    const graph = await this.loadGraph();   // read the entire file
+    graph.entities.push(...newEntities);
+    await this.saveGraph(graph);            // write the entire file back
+}
+```
+
+There is no lock anywhere in the file. The write itself is atomic — a temp file
+plus `rename(2)`, and the source says so — but atomicity is not isolation. Two
+overlapping calls both load the same graph and the second one's save erases the
+first one's work. Nothing errors, because from each caller's side nothing went
+wrong. It is also stdio-only, so "just run one shared process" is not available
+as a workaround, and even a single agent issuing two tool calls concurrently
+hits it.
+
+This is a reference implementation of the protocol. Read it as one.
+
+**graphify** does much better, by construction: one markdown file per memory
+under `graphify-out/memory/`, folded on read. Unrelated writes touch different
+paths, so they cannot interfere — no lock required. What remains is the
+filename:
+
+```python
+slug = re.sub(r"[^\w]", "_", question.lower())[:50].strip("_")
+filename = f"query_{now.strftime('%Y%m%d_%H%M%S')}_{slug}.md"
+...
+out_path.write_text(content, encoding="utf-8")
+```
+
+One-second granularity, a slug truncated at 50 characters, no writer in the
+name, and a plain overwrite. Two agents that reach the same question in the same
+second collide — and so do questions that merely *begin* the same way, which is
+the common case when several agents sweep one subsystem
+(`"how does the authentication subsystem resolve tokens in module 7"`).
+
+**This repo** assigns every observation a UUID and lets SQLite order the writes.
+Identity is never derived from content or from the clock, so nothing can collide.
+
+## Design
+
+Three decisions do the work:
+
+1. **WAL + `BEGIN IMMEDIATE` + `busy_timeout`.** The write lock is taken when
+   the transaction opens rather than at first write, so concurrent writers queue
+   instead of failing at COMMIT. Readers never block.
+2. **Assigned identity.** Every observation gets a UUID. A store that derives an
+   id from timestamp and content silently merges two observations that happen to
+   collide; this one cannot.
+3. **The store serialises, not the process.** N stdio servers across N worktrees
+   share one SQLite file. Safety does not depend on there being a single process,
+   which is why stdio is still offered.
+
+### Worktrees share one store
+
+Per-`cwd` state forks memory exactly when you parallelise. The store is anchored
+with `git rev-parse --git-common-dir`, which points at the original `.git` from
+inside a linked worktree, so with the `<repo>/.worktrees/<name>` layout:
+
+```
+repo/                      -> repo/.parallel-memory/memory.db
+repo/.worktrees/feature-a  -> repo/.parallel-memory/memory.db   (same file)
+repo/.worktrees/feature-b  -> repo/.parallel-memory/memory.db   (same file)
+```
+
+Each worktree still gets its own `writer` identity, so you can tell contributions
+apart without splitting the store. (`--git-dir` would fork it: in a linked
+worktree it resolves to `.git/worktrees/<name>`.)
+
+## Install
+
+```bash
+pip install -e ".[mcp]"
+```
+
+Register it with an MCP client:
+
+```json
+{
+  "mcpServers": {
+    "parallel-memory": {
+      "type": "stdio",
+      "command": "parallel-memory",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+Or run one shared server for a team or a CI fleet:
+
+```bash
+parallel-memory serve --http --port 8931
+```
+
+## Tools
+
+| tool | what it does |
+|---|---|
+| `remember` | record an observation (question, answer, optional `outcome` / `correction` / `source_nodes`) |
+| `recall` | search observations across every writer |
+| `forget` | delete one observation by id |
+| `writers` | list contributing writers with counts |
+| `sync_claude` | fold Claude Code's per-worktree auto-memory into the store and write the union back to every worktree |
+| `sync_graphify` | absorb existing `graphify-out/memory/*.md`, then mirror the store back into it |
+
+`outcome` is one of `useful` / `dead_end` / `corrected` — the same vocabulary
+`graphify reflect` aggregates.
+
+## graphify interop
+
+`sync_graphify` writes graphify's own memory-doc format: YAML frontmatter with
+`type` / `date` / `question` / `contributor` / `outcome` / `correction` /
+`source_nodes`, then `## Answer` and `## Outcome` sections. The `contributor`
+field carries the writer id, so a team graph shows who found what.
+
+The test suite asserts this against **graphify's own parser** when graphify is
+importable, including quotes, tabs, newlines, U+2028/U+2029 and non-ASCII
+questions:
+
+```bash
+PYTHONPATH=/path/to/graphify pytest tests -q
+```
+
+Without graphify installed the suite still runs, against a vendored copy of the
+same grammar.
+
+## Claude Code auto-memory
+
+Claude Code keeps its own memory under `~/.claude/projects/<cwd-slug>/memory/` —
+one markdown file per memory plus a `MEMORY.md` index loaded into context each
+session. The directory is keyed by the working directory, so the repository and
+each of its worktrees get separate stores: parallelising the work fragments the
+memory, silently, and the symptom ("it does not remember") is indistinguishable
+from the model simply not recalling.
+
+`sync_claude` reads every slug belonging to one repository — the root plus
+`<repo>/.worktrees/*` — folds them into the store, and writes the union back to
+each:
+
+```bash
+parallel-memory sync-claude --dry-run   # import only, change nothing
+parallel-memory sync-claude             # unify across every worktree
+```
+
+Frontmatter (`name`, `description`, `metadata.type`, `originSessionId`) survives
+the round trip, the `MEMORY.md` index is regenerated, and files without
+recognisable frontmatter are left untouched.
+
+## Subagents, from more than one vendor
+
+Which model runs a subtask should be a per-task choice. Backends are just a
+command plus how the prompt is passed:
+
+```bash
+parallel-memory backends                       # what is installed here
+parallel-memory run --agent codex  "audit the token refresh path"
+parallel-memory fanout "summarise how auth works"   # every backend at once
+```
+
+```python
+from parallel_memory.agents import Backend, register
+register(Backend("my-agent", ["my-agent-cli", "--headless"]))
+```
+
+Every subagent inherits one `PARALLEL_MEMORY_DB` and is given its own
+`PARALLEL_MEMORY_WRITER`, so findings are attributable and none are lost when
+several finish together:
+
+```console
+$ parallel-memory fanout "Reply with one word: who made you?"
+[
+  { "backend": "claude", "writer": "claude-subagent-0", "output": "Anthropic" },
+  { "backend": "codex",  "writer": "codex-subagent-1",  "output": "OpenAI"    }
+]
+```
+
+Both answers are stored, and both survive the export to graphify memory docs —
+the same question at nearly the same second, which graphify's own writer would
+collapse into one file.
+
+Fanning out like this across a store that does whole-file read-modify-write
+loses most of the run.
+
+### Codex
+
+```bash
+codex mcp add parallel-memory -- /path/to/.venv/bin/parallel-memory serve
+codex mcp list
+```
+
+`codex exec` refuses to run outside a git repository, so the bundled backend
+passes `--skip-git-repo-check`; drop it if you want that check enforced. Its
+stdin is closed, because these CLIs read a piped stdin as extra prompt input.
+
+Working agreements for agents live in [AGENTS.md](AGENTS.md), which Codex,
+Cursor and Gemini CLI read directly and `CLAUDE.md` points at.
+
+## Scope
+
+This holds **observations** — what an agent looked up and what it found. Large,
+perishable, worth capturing the moment it is learned, not worth reviewing.
+
+It is deliberately not the place for **norms** — the invariants that must hold,
+where being wrong is harmful. Those are few, they do not rot, and they should
+live in the repository under review, in path-scoped rule files
+(`.claude/rules/*.md`, Cursor Rules with globs, Copilot `applyTo`) that fire on
+file paths rather than on a model deciding to search.
+
+## Tests
+
+```bash
+pip install -e ".[dev]"
+pytest tests -q
+```
+
+Covers the four concurrency cases above, real `git worktree` resolution, both
+interop round-trips, and multi-vendor fan-out. The agent tests inject a fake
+runner, so the suite spends no model calls.
+
+## License
+
+Apache-2.0
