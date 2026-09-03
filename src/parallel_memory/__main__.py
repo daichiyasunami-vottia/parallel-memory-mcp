@@ -49,6 +49,13 @@ def main(argv: list[str] | None = None) -> int:
     th = tsub.add_parser("hooks", help="install git hooks that re-import after pull")
     th.add_argument("--dir", default=None)
 
+    w = sub.add_parser("worktree", help="who holds which worktree (git worktree lock + expiry)")
+    wsub = w.add_subparsers(dest="wt_cmd", required=True)
+    wc = wsub.add_parser("claim"); wc.add_argument("path"); wc.add_argument("--task", default="")
+    wc.add_argument("--ttl-minutes", type=int, default=120)
+    wr = wsub.add_parser("release"); wr.add_argument("path"); wr.add_argument("--force", action="store_true")
+    wsub.add_parser("holders")
+
     x = sub.add_parser("sync-codex", help="import Codex's distilled memories (read-only)")
     x.add_argument("--db", dest="codex_db", default=None)
 
@@ -122,6 +129,24 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"installed": [str(p) for p in installed]}, indent=2)
               if installed else "hooks already installed")
         return 0
+
+    if args.cmd == "worktree":
+        from datetime import timedelta
+        from . import worktree_lease as wl
+        try:
+            if args.wt_cmd == "claim":
+                lease = wl.claim(args.path, task=args.task, holder=store.writer,
+                                 ttl=timedelta(minutes=args.ttl_minutes))
+                print(json.dumps(lease.to_dict(), ensure_ascii=False, indent=2)); return 0
+            if args.wt_cmd == "release":
+                print(json.dumps({"released": wl.release(args.path, holder=store.writer,
+                                                          force=args.force)})); return 0
+            reaped = wl.reap()
+            print(json.dumps({"holders": [l.to_dict() for l in wl.holders()],
+                              "reaped": [l.to_dict() for l in reaped]},
+                             ensure_ascii=False, indent=2)); return 0
+        except (wl.LeaseHeld, wl.NotHolder) as e:
+            print(str(e), file=sys.stderr); return 3
 
     if args.cmd == "sync-codex":
         from . import codex_sync

@@ -305,6 +305,45 @@ Which to pick is the tradeoff this repository is about: the git route is
 reviewable and needs no operations, the server route gives one authoritative
 copy and real queries.
 
+## Who holds which worktree
+
+Observations and coordination are different kinds of state, and the store above
+is built for only one of them. An observation is append-only and survives by
+never being overwritten. A lease is the opposite: its whole meaning is that it
+changes hands, and if two agents both "hold" a worktree the state is simply
+wrong. Append-only cannot express that, so leases do not go in the store, and
+they never go in `agent-memory/` either — they change by the minute and differ
+per checkout, so committing them would only ever conflict.
+
+git already has the primitive. `git worktree lock --reason` is persisted, shown
+to every tool by `git worktree list --porcelain`, and a second lock on a locked
+worktree is refused — a compare-and-swap with no server. What it lacks is an
+expiry and an owner check on `unlock`; both are supplied by the reason string:
+
+```
+locked parallel-memory;holder=agent-a;until=2026-09-03T12:48:38+00:00;task=6KqN6Ki8…
+```
+
+`holder` and `until` are plain text, so anyone running plain git sees who has it
+and for how long. The task is base64url, because git C-quotes a reason that
+contains spaces or non-ASCII (octal escapes), which would make it unparseable.
+
+```bash
+parallel-memory worktree claim .worktrees/5136 --task "fix auth" --ttl-minutes 120
+parallel-memory worktree holders          # drops expired leases first
+parallel-memory worktree release .worktrees/5136
+```
+
+As MCP tools: `claim_worktree`, `release_worktree`, `worktree_holders`. Rules:
+
+- a claim on a worktree someone else holds fails, unless their lease has expired — a crashed holder must not pin a worktree forever
+- only the holder may release or renew; `--force` exists for a human
+- a lock written with plain git (no `parallel-memory;` prefix) has no expiry and is never taken over
+
+Claude Code's own `activeWorktreeSession` in `~/.claude.json` records one
+session's worktree for that session; it is not a shared registry, which is why
+this exists.
+
 ## Scope
 
 This holds **observations** — what an agent looked up and what it found. Large,

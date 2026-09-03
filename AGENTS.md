@@ -46,6 +46,10 @@ put it here in a pull request instead.
   append-only and that is what removes the need for a merge driver. A change that
   makes two writers able to produce one filename reintroduces exactly the defect
   this repository documents in other tools.
+- **Coordination state never goes in the store or in `agent-memory/`.** A lease
+  changes hands; the store is append-only and the export is committed. Leases
+  live in git's own worktree lock (`worktree_lease.py`). Putting "who holds
+  what" into the observation store would make two holders look like two facts.
 - **Never write into another product's database.** Read it `mode=ro&immutable=1`
   or not at all. `codex_sync` is import-only for this reason, and a test asserts
   the file is byte-identical afterwards. Where a tool's store is documented files
@@ -64,6 +68,7 @@ src/parallel_memory/
   graphify_sync.py   graphify memory-doc export/import
   claude_sync.py     Claude Code auto-memory bridge, unified across worktrees
   team.py            git-based sharing: export, import, commit, hooks
+  worktree_lease.py  who holds which worktree — git worktree lock + expiry
   codex_sync.py      Codex memory reader (read-only) + the markdown surface
   agents.py          multi-vendor subagent runner (claude, codex, ...)
   server.py          MCP tools, stdio and streamable HTTP

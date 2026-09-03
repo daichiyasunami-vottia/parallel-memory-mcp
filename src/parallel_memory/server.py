@@ -19,7 +19,7 @@ from typing import Any
 from . import __version__
 from .store import OUTCOMES, Store
 from .graphify_sync import export as graphify_export, import_dir as graphify_import
-from . import claude_sync, codex_sync, team
+from . import claude_sync, codex_sync, team, worktree_lease
 from .writer import repo_root
 
 TOOLS: list[dict[str, Any]] = [
@@ -80,6 +80,36 @@ TOOLS: list[dict[str, Any]] = [
                 "write_back": {"type": "boolean", "default": True},
             },
         },
+    },
+    {
+        "name": "claim_worktree",
+        "description": "Take a worktree for this agent, or fail if another agent holds an "
+                       "unexpired lease on it. Stored in git's own worktree lock, so plain "
+                       "`git worktree list` shows the holder. Expired leases are reclaimed.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "worktree": {"type": "string", "description": "path of the worktree"},
+                "task": {"type": "string"},
+                "ttl_minutes": {"type": "integer", "default": 120},
+            },
+            "required": ["worktree"],
+        },
+    },
+    {
+        "name": "release_worktree",
+        "description": "Give a worktree back. Only its holder may, unless the lease has expired.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"worktree": {"type": "string"}},
+            "required": ["worktree"],
+        },
+    },
+    {
+        "name": "worktree_holders",
+        "description": "Who holds which worktree of this repository, and until when. "
+                       "Expired leases are dropped first.",
+        "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "sync_team",
@@ -145,6 +175,24 @@ def dispatch(store: Store, name: str, args: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("not inside a git repository; pass repo_root")
         return claude_sync.sync(store, root,
                                 write_back=bool(args.get("write_back", True)))
+    if name == "claim_worktree":
+        from datetime import timedelta
+        try:
+            lease = worktree_lease.claim(
+                args["worktree"], task=args.get("task", ""), holder=store.writer,
+                ttl=timedelta(minutes=int(args.get("ttl_minutes", 120))))
+        except worktree_lease.LeaseHeld as e:
+            return {"claimed": False, "reason": str(e)}
+        return {"claimed": True, **lease.to_dict()}
+    if name == "release_worktree":
+        try:
+            return {"released": worktree_lease.release(args["worktree"], holder=store.writer)}
+        except worktree_lease.NotHolder as e:
+            return {"released": False, "reason": str(e)}
+    if name == "worktree_holders":
+        reaped = worktree_lease.reap()
+        return {"holders": [l.to_dict() for l in worktree_lease.holders()],
+                "reaped": [l.to_dict() for l in reaped]}
     if name == "sync_team":
         return team.sync(store, args.get("directory"),
                          commit=bool(args.get("commit", False)))
