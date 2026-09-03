@@ -19,7 +19,7 @@ from typing import Any
 from . import __version__
 from .store import OUTCOMES, Store
 from .graphify_sync import export as graphify_export, import_dir as graphify_import
-from . import claude_sync
+from . import claude_sync, codex_sync
 from .writer import repo_root
 
 TOOLS: list[dict[str, Any]] = [
@@ -82,6 +82,23 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "sync_codex",
+        "description": "Import Codex's distilled memories "
+                       "($CODEX_HOME/memories_*.sqlite) into this store. Read-only "
+                       "on Codex's side; the write-back surface is a markdown file "
+                       "referenced from AGENTS.md, not Codex's database.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "db_path": {"type": "string",
+                            "description": "defaults to the newest memories_*.sqlite"},
+                "agents_memory_path": {
+                    "type": "string",
+                    "description": "if given, also write the markdown surface here"},
+            },
+        },
+    },
+    {
         "name": "sync_graphify",
         "description": "Mirror observations into graphify memory docs "
                        "(graphify-out/memory/*.md), and absorb any docs already there.",
@@ -115,6 +132,13 @@ def dispatch(store: Store, name: str, args: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("not inside a git repository; pass repo_root")
         return claude_sync.sync(store, root,
                                 write_back=bool(args.get("write_back", True)))
+    if name == "sync_codex":
+        result = codex_sync.sync(store, db_path=args.get("db_path"))
+        target = args.get("agents_memory_path")
+        if target:
+            result["agents_memory"] = str(
+                codex_sync.export_agents_memory(store.all(), target))
+        return result
     if name == "sync_graphify":
         memory_dir = args.get("memory_dir", "graphify-out/memory")
         absorbed = graphify_import(memory_dir)

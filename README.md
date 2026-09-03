@@ -131,6 +131,7 @@ parallel-memory serve --http --port 8931
 | `forget` | delete one observation by id |
 | `writers` | list contributing writers with counts |
 | `sync_claude` | fold Claude Code's per-worktree auto-memory into the store and write the union back to every worktree |
+| `sync_codex` | import Codex's distilled memories (read-only), optionally writing the markdown surface |
 | `sync_graphify` | absorb existing `graphify-out/memory/*.md`, then mirror the store back into it |
 
 `outcome` is one of `useful` / `dead_end` / `corrected` — the same vocabulary
@@ -217,6 +218,28 @@ loses most of the run.
 codex mcp add parallel-memory -- /path/to/.venv/bin/parallel-memory serve
 codex mcp list
 ```
+
+Codex keeps its own distilled memories in `$CODEX_HOME/memories_*.sqlite`
+(`stage1_outputs`: one row per thread), and runs its background work through a
+`jobs` table with ownership tokens and leases.
+
+```bash
+parallel-memory sync-codex                      # import, read-only
+parallel-memory export-agents --out .parallel-memory/CODEX_MEMORY.md
+```
+
+**Why this direction is asymmetric.** Claude Code's memory is synced both ways
+because its store *is* a directory of markdown files with a documented shape —
+writing there is writing the same kind of file a person would. Codex's is
+another product's internal database, versioned by its own `_sqlx_migrations`
+table and guarded by a lease protocol this process is not part of. Inserting
+rows would mean claiming a thread id we do not own and racing a worker holding
+the lease — the exact class of bug this repository is about — and a migration on
+Codex's side could drop whatever was written. So it is opened `mode=ro&immutable=1`
+(no locking, so a running Codex is neither blocked nor disturbed), and the
+write-back surface is a markdown file you reference from your `AGENTS.md`.
+
+A test asserts the database is byte-identical after a sync.
 
 `codex exec` refuses to run outside a git repository, so the bundled backend
 passes `--skip-git-repo-check`; drop it if you want that check enforced. Its

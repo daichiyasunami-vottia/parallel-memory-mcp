@@ -39,6 +39,13 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("backends", help="list agent backends found on this machine")
 
+    x = sub.add_parser("sync-codex", help="import Codex's distilled memories (read-only)")
+    x.add_argument("--db", dest="codex_db", default=None)
+
+    a = sub.add_parser("export-agents",
+                       help="write the markdown memory surface AGENTS.md points at")
+    a.add_argument("--out", default=".parallel-memory/CODEX_MEMORY.md")
+
     c = sub.add_parser("sync-claude",
                        help="unify Claude Code auto-memory across worktrees")
     c.add_argument("--repo-root", default=None)
@@ -94,6 +101,18 @@ def main(argv: list[str] | None = None) -> int:
                            "output": r.output} for r in results],
                          ensure_ascii=False, indent=2))
         return 0 if all(r.ok for r in results) else 1
+
+    if args.cmd == "sync-codex":
+        from . import codex_sync
+        print(json.dumps(codex_sync.sync(store, db_path=args.codex_db),
+                         ensure_ascii=False, indent=2))
+        return 0
+
+    if args.cmd == "export-agents":
+        from . import codex_sync
+        path = codex_sync.export_agents_memory(store.all(), args.out)
+        print(f"{store.count()} observations -> {path}")
+        return 0
 
     if args.cmd == "sync-claude":
         from . import claude_sync

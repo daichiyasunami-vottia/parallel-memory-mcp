@@ -42,6 +42,11 @@ put it here in a pull request instead.
   files that other tools parse. Changing a field name or the escaping is a
   breaking change; the round-trip tests must be updated deliberately, never
   loosened to make a diff pass.
+- **Never write into another product's database.** Read it `mode=ro&immutable=1`
+  or not at all. `codex_sync` is import-only for this reason, and a test asserts
+  the file is byte-identical afterwards. Where a tool's store is documented files
+  (`claude_sync`, `graphify_sync`), writing is fine — that is a published format,
+  not an internal one.
 - **Benchmarks measure other people's software.** Keep `bench/` honest: report
   what the code does, cite the version, and never tune a case to flatter this
   repository.
@@ -54,6 +59,8 @@ src/parallel_memory/
   writer.py          writer identity, and the git-common-dir store location
   graphify_sync.py   graphify memory-doc export/import
   claude_sync.py     Claude Code auto-memory bridge, unified across worktrees
+  codex_sync.py      Codex memory reader (read-only) + the markdown surface
+  agents.py          multi-vendor subagent runner (claude, codex, ...)
   server.py          MCP tools, stdio and streamable HTTP
 tests/               concurrency, worktree resolution, both interop round-trips
 bench/               the comparison against server-memory and graphify
