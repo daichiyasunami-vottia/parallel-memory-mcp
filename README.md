@@ -178,6 +178,22 @@ Frontmatter (`name`, `description`, `metadata.type`, `originSessionId`) survives
 the round trip, the `MEMORY.md` index is regenerated, and files without
 recognisable frontmatter are left untouched.
 
+**Stores left behind by deleted worktrees are picked up too.** Removing a
+worktree removes the checkout, not the memory directory Claude Code keyed to its
+cwd — and transcript cleanup (`cleanupPeriodDays`, 30 by default) deletes
+`*.jsonl` while leaving `memory/` alone. Those files then sit on disk
+permanently: never loaded, never collected. Walking the live filesystem cannot
+find them, because the directory they were named after is gone, so they are
+discovered from the project keys instead:
+
+```
+<repo>/.worktrees/a   ->  ~/.claude/projects/<repo slug>--worktrees-a/memory/
+```
+
+The doubled dash comes from `/.` and is what keeps a sibling checkout
+(`<repo>-1467`) from matching. Stranded stores are imported; they are never
+written back to, since nothing will open them again.
+
 ## Subagents, from more than one vendor
 
 Which model runs a subtask should be a per-task choice. Backends are just a

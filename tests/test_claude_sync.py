@@ -146,3 +146,72 @@ def test_foreign_files_are_left_alone(world, tmp_path):
     store = Store(path=tmp_path / "m.db", writer="test")
     cs.sync(store, root)
     assert (d / "notes.md").read_text(encoding="utf-8") == "no frontmatter here\n"
+
+
+# --- stores left behind by deleted worktrees --------------------------------
+
+def test_finds_a_store_whose_worktree_is_gone(world, tmp_path):
+    """Deleting a worktree removes the checkout, not the memory keyed to it."""
+    root, projects = world
+    wt = root / ".worktrees" / "a"
+    stranded = _memdir(projects, wt)
+    (stranded / "from_a.md").write_text(MEMORY.format(
+        name="from_a", desc="learned in worktree a", mtype="feedback", body="a body"))
+
+    # the worktree goes away; its project key does not
+    _git("worktree", "remove", "--force", str(wt), cwd=root)
+    assert not wt.exists()
+
+    assert cs._live_dirs(root) == [] or stranded not in cs._live_dirs(root)
+    assert stranded in cs.stranded_dirs(root)
+    assert stranded in cs.memory_dirs(root)
+
+
+def test_stranded_memories_are_imported(world, tmp_path):
+    root, projects = world
+    root_dir = _memdir(projects, root)
+    wt = root / ".worktrees" / "a"
+    stranded = _memdir(projects, wt)
+    (stranded / "from_a.md").write_text(MEMORY.format(
+        name="from_a", desc="learned in worktree a", mtype="feedback", body="a body"))
+    _git("worktree", "remove", "--force", str(wt), cwd=root)
+
+    store = Store(path=tmp_path / "m.db", writer="test")
+    result = cs.sync(store, root)
+
+    assert result["imported"] == 1
+    assert result["stranded_dirs"] == [str(stranded)]
+    assert {o["meta"]["name"] for o in store.all()} == {"from_a"}
+    # and it is now reachable from the live store
+    assert (root_dir / "from_a.md").exists()
+
+
+def test_stranded_stores_are_not_written_back_to(world, tmp_path):
+    """Writing into a store nothing will open again just moves unread files."""
+    root, projects = world
+    _memdir(projects, root)
+    wt = root / ".worktrees" / "a"
+    stranded = _memdir(projects, wt)
+    (stranded / "from_a.md").write_text(MEMORY.format(
+        name="from_a", desc="s", mtype="feedback", body="b"))
+    _git("worktree", "remove", "--force", str(wt), cwd=root)
+
+    store = Store(path=tmp_path / "m.db", writer="test")
+    store.remember("unrelated", "x", meta={"origin": "claude", "name": "unrelated"})
+    cs.sync(store, root)
+
+    assert not (stranded / "unrelated.md").exists()
+    assert str(stranded) not in cs.sync(store, root)["memory_dirs"]
+
+
+def test_a_sibling_checkout_is_not_mistaken_for_a_worktree(world, tmp_path):
+    """<repo>-1467 slugs to <repo slug>-1467, which must not match."""
+    root, projects = world
+    sibling = root.parent / (root.name + "-1467")
+    sibling.mkdir()
+    d = _memdir(projects, sibling)
+    (d / "other.md").write_text(MEMORY.format(
+        name="other", desc="s", mtype="feedback", body="b"))
+
+    assert d not in cs.stranded_dirs(root)
+    assert d not in cs.memory_dirs(root)

@@ -32,19 +32,55 @@ def project_slug(path: "str | Path") -> str:
     return str(Path(path)).replace("/", "-").replace(".", "-")
 
 
-def memory_dirs(repo_root: "str | Path", *, existing_only: bool = True) -> list[Path]:
-    """Every Claude memory directory belonging to one repository.
+def stranded_dirs(repo_root: "str | Path") -> list[Path]:
+    """Memory directories for worktrees of this repo that no longer exist.
 
-    The repository root first, then one per ``<repo>/.worktrees/<name>``, which
-    is where linked worktrees live by convention.
+    Deleting a worktree removes the checkout, not the store Claude Code keyed to
+    its cwd. Transcript cleanup does not touch `memory/` either, so those files
+    stay on disk forever: never loaded, never collected. Walking the live
+    filesystem cannot find them — the directory they were named after is gone —
+    so they are discovered from the project keys instead.
+
+    A hidden subdirectory of the repo slugs to ``<repo slug>--<name>``, because
+    the ``/`` and the ``.`` each become ``-``. Requiring that doubled dash is
+    what keeps a sibling checkout (``<repo>-1467``) from matching.
     """
+    prefix = project_slug(repo_root) + "--"
+    if not CLAUDE_PROJECTS.is_dir():
+        return []
+    live = {d.resolve() for d in _live_dirs(repo_root)}
+    found = []
+    for project in sorted(CLAUDE_PROJECTS.iterdir()):
+        if not project.is_dir() or not project.name.startswith(prefix):
+            continue
+        memory = project / "memory"
+        if memory.is_dir() and memory.resolve() not in live:
+            found.append(memory)
+    return found
+
+
+def _live_dirs(repo_root: "str | Path") -> list[Path]:
+    """Memory directories for the repo root and its current worktrees."""
     repo_root = Path(repo_root)
     candidates = [repo_root]
     worktrees = repo_root / ".worktrees"
     if worktrees.is_dir():
         candidates += sorted(p for p in worktrees.iterdir() if p.is_dir())
     dirs = [CLAUDE_PROJECTS / project_slug(c) / "memory" for c in candidates]
-    return [d for d in dirs if d.is_dir()] if existing_only else dirs
+    return [d for d in dirs if d.is_dir()]
+
+
+def memory_dirs(repo_root: "str | Path", *,
+                include_stranded: bool = True) -> list[Path]:
+    """Every Claude memory directory belonging to one repository.
+
+    The repository root first, then its current worktrees, then any store left
+    behind by a worktree that has since been deleted.
+    """
+    dirs = _live_dirs(repo_root)
+    if include_stranded:
+        dirs += stranded_dirs(repo_root)
+    return dirs
 
 
 # --- reading -----------------------------------------------------------------
@@ -184,7 +220,9 @@ def sync(store, repo_root: "str | Path", *, write_back: bool = True) -> dict[str
 
     Returns what happened, per directory. ``write_back=False`` imports only.
     """
-    dirs = memory_dirs(repo_root)
+    live = _live_dirs(repo_root)
+    stranded = stranded_dirs(repo_root)
+    dirs = live + stranded
     known = {(o.get("meta") or {}).get("name") for o in store.all()}
     imported = 0
     for d in dirs:
@@ -208,13 +246,16 @@ def sync(store, repo_root: "str | Path", *, write_back: bool = True) -> dict[str
             imported += 1
 
     claude_owned = [o for o in store.all() if (o.get("meta") or {}).get("origin") == "claude"]
+    # Only live stores are written back. Writing into a store no session will
+    # ever open again would just move the files nobody reads.
     distributed = {}
     if write_back:
-        for d in dirs:
+        for d in live:
             distributed[str(d)] = len(write_dir(claude_owned, d))
     return {
         "repo_root": str(repo_root),
-        "memory_dirs": [str(d) for d in dirs],
+        "memory_dirs": [str(d) for d in live],
+        "stranded_dirs": [str(d) for d in stranded],
         "imported": imported,
         "unified": len(claude_owned),
         "written": distributed,
