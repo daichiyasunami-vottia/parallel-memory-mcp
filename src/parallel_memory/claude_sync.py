@@ -178,61 +178,105 @@ def render_memory_file(obs: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def render_index(observations: Iterable[dict[str, Any]],
-                 preserved: Iterable[str] = ()) -> str:
-    """Derive the index from the memories, but never discard curated structure.
+INDEX_BUDGET_BYTES = 25 * 1024   # Claude Code loads only the first 200 lines / 25 KB
 
-    Every line for a machine-derived memory is rebuilt from its frontmatter, so
-    a memory can no longer be on disk yet absent from the index. Lines that
-    point at a file which exists but has no parseable frontmatter are kept
-    verbatim: those are hand-written aggregators ("hub" notes that group a dozen
-    memories under one line, or a note whose whole job is to bias recall). They
-    were written as index structure, not as index entries, and a regenerate
-    that dropped them would trade two drift classes for a third.
+
+def target_filename(obs: dict[str, Any]) -> str:
+    """The file a memory lives in.
+
+    The original filename is authoritative when the memory came from a store
+    (kept in ``meta.file``). Frontmatter ``name`` is human-written and on real
+    stores contains slashes, backticks and globs — it is a label, not a path —
+    so it is only ever used, sanitised, for a memory that never had a file.
     """
-    lines = [INDEX_HEADER, ""]
-    for obs in observations:
-        meta = obs.get("meta") or {}
-        name = meta.get("name") or _slug(obs["question"])
-        title = meta.get("title") or obs["question"]
-        hook = meta.get("hook") or _first_sentence(obs["answer"])
-        lines.append(f"- [{title}]({name}.md)" + (f" — {hook}" if hook else ""))
-    lines.extend(preserved)
-    return "\n".join(lines) + "\n"
+    meta = obs.get("meta") or {}
+    if meta.get("file"):
+        return Path(meta["file"]).name
+    return _slug(meta.get("name") or obs["question"]) + ".md"
 
 
-def write_dir(observations: list[dict[str, Any]], memory_dir: "str | Path") -> list[Path]:
-    """Write the union into one Claude memory directory, index included.
+def derived_line(obs: dict[str, Any]) -> tuple[str, str]:
+    """(target filename, index line) for one machine-derived memory."""
+    meta = obs.get("meta") or {}
+    target = target_filename(obs)
+    title = meta.get("title") or obs["question"]
+    hook = meta.get("hook") or _first_sentence(obs["answer"])
+    return target, f"- [{title}]({target})" + (f" — {hook}" if hook else "")
 
-    Only files this store owns are rewritten; anything else in the directory is
-    left alone, and a byte-identical file is not touched.
+
+def rebuild_index(existing_text: str, observations: Iterable[dict[str, Any]],
+                  newly_arrived: set[str], memory_dir: Path) -> tuple[str, dict[str, Any]]:
+    """Repair the index without deciding for the human what belongs in it.
+
+    A curated MEMORY.md is deliberately a subset: on real stores roughly one
+    memory in five has a top-level line and the rest are reached through hub
+    notes. Deriving one line per file inverts that, and at a few hundred files
+    produces a 200–400 KB index that the loader truncates — the same invisible
+    memory this whole design exists to remove. So the index stays authoritative
+    for WHICH memories are listed. This function only:
+
+    * rewrites the line of every entry already present, from frontmatter;
+    * removes lines whose target file no longer exists;
+    * adds a line for a memory that this sync itself brought in (a worktree or
+      stranded store) — never for a local file the curator left unlisted;
+    * keeps every other line verbatim (headings, prose, multi-target entries,
+      hub notes without frontmatter), in place — structure lives between the
+      pointers, and a per-pointer rule cannot see it.
+
+    Anything unlisted is reported, not added.
+    """
+    by_target = {t: line for t, line in (derived_line(o) for o in observations)}
+    out, seen, removed = [], set(), []
+    for raw in existing_text.split("\n"):
+        m = _INDEX_RE.match(raw.strip())
+        if not m:
+            out.append(raw)                      # heading / prose / anything else
+            continue
+        target = m.group("file")
+        if not (memory_dir / target).is_file():
+            removed.append(target); continue     # dangling pointer
+        seen.add(target)
+        out.append(by_target.get(target, raw))   # derived → refreshed; curated → verbatim
+    added = []
+    for target in sorted(newly_arrived):
+        if target in by_target and target not in seen:
+            out.append(by_target[target]); added.append(target)
+    while out and out[-1] == "":
+        out.pop()
+    if not any(l.strip() for l in out):
+        out = [INDEX_HEADER, ""]
+    text = "\n".join(out) + "\n"
+    unlisted = sorted(t for t in by_target if t not in seen and t not in added)
+    size = len(text.encode("utf-8"))
+    return text, {"added": added, "removed": removed, "unlisted": unlisted,
+                  "bytes": size, "over_budget": size > INDEX_BUDGET_BYTES}
+
+
+def write_dir(observations: list[dict[str, Any]], memory_dir: "str | Path",
+              newly_arrived: set[str] | None = None) -> dict[str, Any]:
+    """Write memory files, then repair (not regenerate) the index.
+
+    Only files this store owns are rewritten; a byte-identical file is not
+    touched. Returns what happened to the index so a caller can surface
+    ``unlisted`` and ``over_budget`` to a human.
     """
     memory_dir = Path(memory_dir)
     memory_dir.mkdir(parents=True, exist_ok=True)
     written = []
     for obs in observations:
-        meta = obs.get("meta") or {}
-        name = meta.get("name") or _slug(obs["question"])
-        path = memory_dir / f"{name}.md"
+        target, _ = derived_line(obs)
+        path = memory_dir / target
         content = render_memory_file(obs)
         if not path.exists() or path.read_text(encoding="utf-8") != content:
             path.write_text(content, encoding="utf-8")
         written.append(path)
-    # Curated lines: target exists on disk but is not something we derived a
-    # line for. Keep them exactly as written, after the derived entries.
-    derived = {f"{(o.get('meta') or {}).get('name') or _slug(o['question'])}.md"
-               for o in observations}
-    preserved = []
-    for target, entry in read_index(memory_dir).items():
-        if target in derived or not (memory_dir / target).is_file():
-            continue
-        line = f"- [{entry['title']}]({target})" + (f" — {entry['hook']}" if entry["hook"] else "")
-        preserved.append(line)
     index_path = memory_dir / INDEX_NAME
-    index = render_index(observations, preserved)
-    if not index_path.exists() or index_path.read_text(encoding="utf-8") != index:
-        index_path.write_text(index, encoding="utf-8")
-    return written
+    existing = index_path.read_text(encoding="utf-8") if index_path.exists() else INDEX_HEADER + "\n\n"
+    text, report = rebuild_index(existing, observations, set(newly_arrived or ()), memory_dir)
+    if text != existing:
+        index_path.write_text(text, encoding="utf-8")
+    report["written"] = len(written)
+    return report
 
 
 # --- the round trip ----------------------------------------------------------
@@ -240,12 +284,15 @@ def write_dir(observations: list[dict[str, Any]], memory_dir: "str | Path") -> l
 def sync(store, repo_root: "str | Path", *, write_back: bool = True) -> dict[str, Any]:
     """Fold every worktree's Claude memory into the store, then redistribute it.
 
-    Returns what happened, per directory. ``write_back=False`` imports only.
+    A memory is added to a live store's index only if it arrived from
+    somewhere else (another worktree, a stranded store). Files a curator left
+    unlisted in their own store stay unlisted and are reported instead.
     """
     live = _live_dirs(repo_root)
     stranded = stranded_dirs(repo_root)
     dirs = live + stranded
     known = {(o.get("meta") or {}).get("name") for o in store.all()}
+    present: dict[Path, set[str]] = {d: {m["_path"] for m in read_dir(d)} for d in live}
     imported = 0
     for d in dirs:
         for mem in read_dir(d):
@@ -253,34 +300,28 @@ def sync(store, repo_root: "str | Path", *, write_back: bool = True) -> dict[str
                 continue
             index = read_index(d).get(mem["_path"], {})
             store.remember(
-                mem.get("description") or mem["name"],
-                mem.get("body", ""),
-                meta={
-                    "origin": "claude",
-                    "name": mem["name"],
-                    "type": mem.get("meta_type", "project"),
-                    "title": index.get("title", ""),
-                    "hook": index.get("hook", ""),
-                    "originSessionId": mem.get("meta_originSessionId", ""),
-                },
+                mem.get("description") or mem["name"], mem.get("body", ""),
+                meta={"origin": "claude", "name": mem["name"], "file": mem["_path"],
+                      "type": mem.get("meta_type", "project"),
+                      "title": index.get("title", ""), "hook": index.get("hook", ""),
+                      "originSessionId": mem.get("meta_originSessionId", "")},
             )
-            known.add(mem["name"])
-            imported += 1
+            known.add(mem["name"]); imported += 1
 
     claude_owned = [o for o in store.all() if (o.get("meta") or {}).get("origin") == "claude"]
-    # Only live stores are written back. Writing into a store no session will
-    # ever open again would just move the files nobody reads.
-    distributed = {}
+    all_targets = {derived_line(o)[0] for o in claude_owned}
+    reports = {}
     if write_back:
         for d in live:
-            distributed[str(d)] = len(write_dir(claude_owned, d))
+            arrived = all_targets - present.get(d, set())      # new to THIS store
+            reports[str(d)] = write_dir(claude_owned, d, newly_arrived=arrived)
     return {
         "repo_root": str(repo_root),
         "memory_dirs": [str(d) for d in live],
         "stranded_dirs": [str(d) for d in stranded],
         "imported": imported,
         "unified": len(claude_owned),
-        "written": distributed,
+        "index": reports,
     }
 
 
@@ -288,9 +329,11 @@ def _slug(s: str) -> str:
     return re.sub(r"[^\w]+", "_", s.strip().lower())[:60].strip("_") or "memory"
 
 
-def _first_sentence(body: str) -> str:
+def _first_sentence(body: str, limit: int = 120) -> str:
+    """One line for the index. Always capped: a hook is a hint, not the memory."""
     text = " ".join(body.strip().split())
-    for sep in ("。", ". "):
+    for sep, end in (("。", "。"), (". ", ".")):
         if sep in text:
-            return text.split(sep)[0] + ("。" if sep == "。" else "")
-    return text[:120]
+            text = text.split(sep)[0] + end
+            break
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"

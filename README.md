@@ -175,8 +175,29 @@ parallel-memory sync-claude             # unify across every worktree
 ```
 
 Frontmatter (`name`, `description`, `metadata.type`, `originSessionId`) survives
-the round trip, the `MEMORY.md` index is regenerated, and files without
-recognisable frontmatter are left untouched.
+the round trip, and files without recognisable frontmatter are left untouched.
+
+**The index is repaired, not regenerated.** `MEMORY.md` is what Claude Code
+injects each session, and it is capped at the first 200 lines / 25 KB. A curated
+index is deliberately a subset — on real stores roughly one memory in five has a
+top-level line and the rest are reached through hub notes. Deriving one line
+per file inverts that and, at a few hundred files, produces a 200–400 KB index
+the loader truncates: the same invisible memory this design exists to remove
+(measured by a reviewer in anthropics/claude-code#81833: 462 files → 462 lines /
+200 KB; 861 files → 400 KB). So the index stays authoritative for *which*
+memories are listed. Sync only:
+
+- refreshes the line of every entry already present, from frontmatter
+- removes lines whose target file no longer exists
+- adds a line for a memory that *arrived from elsewhere* (another worktree, a
+  stranded store) — never for a local file the curator left unlisted
+- keeps every other line verbatim and **in place**: headings, prose, multi-target
+  entries, hub notes without frontmatter
+
+Unlisted memories and an index over 25 KB are reported, not acted on. The file a
+memory lives in is taken from where it was found, never rebuilt from its `name`
+— on real stores `name` differs from the filename in two files out of three and
+sometimes contains `/`, backticks or globs; it is a label, not a path.
 
 **Stores left behind by deleted worktrees are picked up too.** Removing a
 worktree removes the checkout, not the memory directory Claude Code keyed to its

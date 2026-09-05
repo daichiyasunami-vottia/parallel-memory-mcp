@@ -100,8 +100,9 @@ def test_worktree_memories_are_unified(world, tmp_path):
         names = {p.stem for p in d.glob("*.md")} - {"MEMORY"}
         assert names == {"from_root", "from_a", "from_b"}, f"{d} was not unified"
         index = (d / "MEMORY.md").read_text(encoding="utf-8")
-        assert index.startswith("# Memory Index")
-        assert index.count("\n- ") == 3
+        # each store gains lines only for what ARRIVED from elsewhere (2), never
+        # for its own unlisted file — that is the curator's call
+        assert index.count("(from_") == 2, index
 
 
 def test_round_trip_preserves_type_and_session(world, tmp_path):
@@ -182,8 +183,9 @@ def test_stranded_memories_are_imported(world, tmp_path):
     assert result["imported"] == 1
     assert result["stranded_dirs"] == [str(stranded)]
     assert {o["meta"]["name"] for o in store.all()} == {"from_a"}
-    # and it is now reachable from the live store
+    # it arrived from elsewhere, so it is written AND given a line
     assert (root_dir / "from_a.md").exists()
+    assert "(from_a.md)" in (root_dir / "MEMORY.md").read_text(encoding="utf-8")
 
 
 def test_stranded_stores_are_not_written_back_to(world, tmp_path):
@@ -238,7 +240,82 @@ def test_curated_index_lines_survive_regeneration(world, tmp_path):
     assert "- [Evidence hub](hub-evidence.md) — start here for anything about proof" in index, (
         "a curated line whose target exists was dropped by regeneration"
     )
+    # and it kept its POSITION (not pushed to the truncatable tail)
+    assert index.index("hub-evidence") > index.index("feedback_x")
     # and a line whose target is gone is still removed
     (d / "MEMORY.md").write_text(index + "- [ghost](ghost.md) — no such file\n")
     cs.sync(store, root)
     assert "ghost.md" not in (d / "MEMORY.md").read_text(encoding="utf-8")
+
+
+# --- the four findings from anthropics/claude-code#81833 (review of 9c04ce9) --
+
+def test_index_stays_a_curated_subset_not_one_line_per_file(world, tmp_path):
+    """300 memories on disk, 20 listed: the index must NOT balloon to 300 lines."""
+    root, projects = world
+    d = _memdir(projects, root)
+    for i in range(300):
+        (d / f"mem_{i:03d}.md").write_text(MEMORY.format(
+            name=f"mem_{i:03d}", desc=f"fact {i}", mtype="project", body="x. " * 200))
+    listed = "".join(f"- [fact {i}](mem_{i:03d}.md) — hook\n" for i in range(20))
+    (d / "MEMORY.md").write_text("# Memory Index\n\n" + listed)
+    before = (d / "MEMORY.md").stat().st_size
+
+    store = Store(path=tmp_path / "m.db", writer="test")
+    result = cs.sync(store, root)
+
+    text = (d / "MEMORY.md").read_text(encoding="utf-8")
+    assert text.count("\n- ") == 20, "regeneration inverted the curation"
+    assert (d / "MEMORY.md").stat().st_size < before * 2
+    rep = result["index"][str(d)]
+    assert len(rep["unlisted"]) == 280 and rep["over_budget"] is False
+
+
+def test_headings_prose_and_multi_target_lines_survive_in_place(world, tmp_path):
+    root, projects = world
+    d = _memdir(projects, root)
+    for n in ("a", "b", "x"):
+        (d / f"{n}.md").write_text(MEMORY.format(name=n, desc=f"desc {n}", mtype="project", body="b"))
+    (d / "MEMORY.md").write_text(
+        "# Memory Index\n\n## Threads\n"
+        "- [Thread with X](a.md) + [closed for robots](b.md) - two targets\n"
+        "Archive lives in ARCHIVE.md; keep this file under 20 KB.\n\n"
+        "## Facts\n- [desc x](x.md) — hook\n")
+    store = Store(path=tmp_path / "m.db", writer="test")
+    cs.sync(store, root)
+    text = (d / "MEMORY.md").read_text(encoding="utf-8")
+    for must in ("## Threads", "## Facts", "+ [closed for robots](b.md)", "keep this file under 20 KB"):
+        assert must in text, must
+    assert text.index("## Threads") < text.index("(a.md)") < text.index("## Facts") < text.index("(x.md)")
+
+
+def test_hook_is_always_capped(world, tmp_path):
+    assert len(cs._first_sentence("A" * 300 + ". tail")) <= 120
+    assert len(cs._first_sentence("A" * 300)) <= 120
+    assert cs._first_sentence("Short. Rest.") == "Short."
+
+
+def test_over_budget_is_reported(world, tmp_path):
+    root, projects = world
+    d = _memdir(projects, root)
+    for i in range(120):
+        (d / f"m{i}.md").write_text(MEMORY.format(name=f"m{i}", desc="d" * 200, mtype="project", body="b"))
+    (d / "MEMORY.md").write_text("# Memory Index\n\n" + "".join(f"- [{'d'*200}](m{i}.md)\n" for i in range(120)))
+    store = Store(path=tmp_path / "m.db", writer="test")
+    rep = cs.sync(store, root)["index"][str(d)]
+    assert rep["over_budget"] is True and rep["bytes"] > cs.INDEX_BUDGET_BYTES
+
+
+
+def test_frontmatter_name_with_path_characters_never_becomes_a_path(world, tmp_path):
+    """Real stores have names like 'JSDoc 内のグロブ `*/` は biome が壊す'."""
+    root, projects = world
+    d = _memdir(projects, root)
+    (d / "biome_glob.md").write_text(MEMORY.format(
+        name="JSDoc 内のグロブ `*/` は biome が壊す", desc="glob in jsdoc", mtype="feedback", body="b"))
+    (d / "MEMORY.md").write_text("# Memory Index\n\n- [glob in jsdoc](biome_glob.md) — hook\n")
+    store = Store(path=tmp_path / "m.db", writer="test")
+    cs.sync(store, root)
+    assert (d / "biome_glob.md").exists()
+    assert not any(p.is_dir() for p in d.iterdir()), "a name with '/' created a directory"
+    assert "(biome_glob.md)" in (d / "MEMORY.md").read_text(encoding="utf-8")

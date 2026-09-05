@@ -42,6 +42,12 @@ put it here in a pull request instead.
   files that other tools parse. Changing a field name or the escaping is a
   breaking change; the round-trip tests must be updated deliberately, never
   loosened to make a diff pass.
+- **`MEMORY.md` is repaired, never regenerated.** It is a curated subset under a
+  25 KB load cap. Refresh existing lines, drop dangling ones, add lines only for
+  memories this sync brought in from elsewhere, keep everything else in place.
+  Deriving one line per file inverts the curation and truncates the tail.
+- **A memory's file is where it was found, never derived from `name`.** On real
+  stores `name` ≠ filename in 123 of 187 files and can contain path characters.
 - **Nothing in `agent-memory/` is ever rewritten or renamed.** The directory is
   append-only and that is what removes the need for a merge driver. A change that
   makes two writers able to produce one filename reintroduces exactly the defect
