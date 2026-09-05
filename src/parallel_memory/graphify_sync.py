@@ -63,6 +63,10 @@ def render_doc(obs: dict[str, Any]) -> str:
         # here keeps a re-import exact without changing what graphify reads.
         f'memory_id: "{yaml_str(obs["id"])}"',
     ]
+    prov = (obs.get("meta") or {}).get("provenance") or {}
+    if prov.get("head"):
+        lines.append(f'head: "{yaml_str(prov["head"])}"')
+        lines.append(f'branch: "{yaml_str(prov.get("branch", ""))}"')
     if obs.get("outcome"):
         lines.append(f'outcome: "{yaml_str(obs["outcome"])}"')
     if obs.get("correction"):

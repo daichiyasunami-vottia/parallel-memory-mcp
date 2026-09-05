@@ -305,6 +305,30 @@ Which to pick is the tradeoff this repository is about: the git route is
 reviewable and needs no operations, the server route gives one authoritative
 copy and real queries.
 
+## Which source an observation was about
+
+Two worktrees of one repository can sit hundreds of commits apart (the repo
+this was measured on has `main` and `staging` 776 / 676 commits apart, 424
+files different). An observation written in one may be false in the other, and
+nothing in its text says so.
+
+So `remember` records the checkout it ran in — `branch`, `head`, whether the
+tree was dirty, and the **blob hash of every file named in `source_nodes`** —
+and `recall` compares those blobs against the checkout it is running in:
+
+```json
+{"question": "...", "stale": true, "changed_since": ["apps/admin/next.config.ts"],
+ "meta": {"provenance": {"branch": "main", "head": "3247d9d1…", "dirty": false,
+                         "blobs": {"apps/admin/next.config.ts": "8a1f…"}}}}
+```
+
+The comparison is by blob, not by commit. A commit that touched unrelated files
+leaves the observation fresh; an uncommitted edit to a named file makes it
+stale immediately. Outside a repository, or for a `source_node` that is not a
+path, nothing is recorded and the write never fails. `head` and `branch` are
+also written into the exported memory docs; graphify ignores keys it does not
+know.
+
 ## Who holds which worktree
 
 Observations and coordination are different kinds of state, and the store above

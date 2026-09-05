@@ -69,6 +69,7 @@ src/parallel_memory/
   claude_sync.py     Claude Code auto-memory bridge, unified across worktrees
   team.py            git-based sharing: export, import, commit, hooks
   worktree_lease.py  who holds which worktree — git worktree lock + expiry
+  provenance.py      branch / head / blob hashes an observation was made against; staleness on recall
   codex_sync.py      Codex memory reader (read-only) + the markdown surface
   agents.py          multi-vendor subagent runner (claude, codex, ...)
   server.py          MCP tools, stdio and streamable HTTP

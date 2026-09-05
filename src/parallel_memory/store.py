@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .writer import store_path, writer_id
+from . import provenance
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS observations (
@@ -100,7 +101,9 @@ class Store:
             "outcome": outcome,
             "correction": correction,
             "source_nodes": json.dumps(list(source_nodes or []), ensure_ascii=False),
-            "meta": json.dumps(dict(meta or {}), ensure_ascii=False),
+            "meta": json.dumps({**dict(meta or {}),
+                                **({"provenance": prov} if (prov := provenance.capture(source_nodes)) else {})},
+                               ensure_ascii=False),
         }
         with self._write() as con:
             con.execute(
@@ -136,7 +139,15 @@ class Store:
         sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
         params.append(int(limit))
         with self._connect() as con:
-            return [_decode(dict(r)) for r in con.execute(sql, params)]
+            rows = [_decode(dict(r)) for r in con.execute(sql, params)]
+        # Say whether each observation still describes the source in front of
+        # the reader. Two worktrees can be hundreds of commits apart.
+        for row in rows:
+            st = provenance.staleness((row.get("meta") or {}).get("provenance") or {})
+            if st:
+                row["stale"] = st["stale"]
+                row["changed_since"] = st["changed"]
+        return rows
 
     def all(self) -> list[dict[str, Any]]:
         with self._connect() as con:
