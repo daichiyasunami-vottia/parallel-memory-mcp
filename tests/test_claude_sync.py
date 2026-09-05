@@ -215,3 +215,30 @@ def test_a_sibling_checkout_is_not_mistaken_for_a_worktree(world, tmp_path):
 
     assert d not in cs.stranded_dirs(root)
     assert d not in cs.memory_dirs(root)
+
+
+
+def test_curated_index_lines_survive_regeneration(world, tmp_path):
+    """A hand-written hub note has no frontmatter; its index line must be kept."""
+    root, projects = world
+    d = _memdir(projects, root)
+    (d / "feedback_x.md").write_text(MEMORY.format(
+        name="feedback_x", desc="a fact", mtype="feedback", body="the fact"))
+    (d / "hub-evidence.md").write_text("# Evidence hub\n\nGroups a dozen memories.\n")
+    (d / "MEMORY.md").write_text(
+        "# Memory Index\n\n"
+        "- [a fact](feedback_x.md) — hook\n"
+        "- [Evidence hub](hub-evidence.md) — start here for anything about proof\n")
+
+    store = Store(path=tmp_path / "m.db", writer="test")
+    cs.sync(store, root)
+
+    index = (d / "MEMORY.md").read_text(encoding="utf-8")
+    assert "(feedback_x.md)" in index
+    assert "- [Evidence hub](hub-evidence.md) — start here for anything about proof" in index, (
+        "a curated line whose target exists was dropped by regeneration"
+    )
+    # and a line whose target is gone is still removed
+    (d / "MEMORY.md").write_text(index + "- [ghost](ghost.md) — no such file\n")
+    cs.sync(store, root)
+    assert "ghost.md" not in (d / "MEMORY.md").read_text(encoding="utf-8")

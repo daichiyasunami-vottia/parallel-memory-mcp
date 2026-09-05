@@ -178,7 +178,18 @@ def render_memory_file(obs: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def render_index(observations: Iterable[dict[str, Any]]) -> str:
+def render_index(observations: Iterable[dict[str, Any]],
+                 preserved: Iterable[str] = ()) -> str:
+    """Derive the index from the memories, but never discard curated structure.
+
+    Every line for a machine-derived memory is rebuilt from its frontmatter, so
+    a memory can no longer be on disk yet absent from the index. Lines that
+    point at a file which exists but has no parseable frontmatter are kept
+    verbatim: those are hand-written aggregators ("hub" notes that group a dozen
+    memories under one line, or a note whose whole job is to bias recall). They
+    were written as index structure, not as index entries, and a regenerate
+    that dropped them would trade two drift classes for a third.
+    """
     lines = [INDEX_HEADER, ""]
     for obs in observations:
         meta = obs.get("meta") or {}
@@ -186,6 +197,7 @@ def render_index(observations: Iterable[dict[str, Any]]) -> str:
         title = meta.get("title") or obs["question"]
         hook = meta.get("hook") or _first_sentence(obs["answer"])
         lines.append(f"- [{title}]({name}.md)" + (f" — {hook}" if hook else ""))
+    lines.extend(preserved)
     return "\n".join(lines) + "\n"
 
 
@@ -206,8 +218,18 @@ def write_dir(observations: list[dict[str, Any]], memory_dir: "str | Path") -> l
         if not path.exists() or path.read_text(encoding="utf-8") != content:
             path.write_text(content, encoding="utf-8")
         written.append(path)
+    # Curated lines: target exists on disk but is not something we derived a
+    # line for. Keep them exactly as written, after the derived entries.
+    derived = {f"{(o.get('meta') or {}).get('name') or _slug(o['question'])}.md"
+               for o in observations}
+    preserved = []
+    for target, entry in read_index(memory_dir).items():
+        if target in derived or not (memory_dir / target).is_file():
+            continue
+        line = f"- [{entry['title']}]({target})" + (f" — {entry['hook']}" if entry["hook"] else "")
+        preserved.append(line)
     index_path = memory_dir / INDEX_NAME
-    index = render_index(observations)
+    index = render_index(observations, preserved)
     if not index_path.exists() or index_path.read_text(encoding="utf-8") != index:
         index_path.write_text(index, encoding="utf-8")
     return written
