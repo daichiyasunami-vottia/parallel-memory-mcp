@@ -319,3 +319,34 @@ def test_frontmatter_name_with_path_characters_never_becomes_a_path(world, tmp_p
     assert (d / "biome_glob.md").exists()
     assert not any(p.is_dir() for p in d.iterdir()), "a name with '/' created a directory"
     assert "(biome_glob.md)" in (d / "MEMORY.md").read_text(encoding="utf-8")
+
+
+def test_name_that_differs_from_filename_without_path_chars(world, tmp_path):
+    """A kebab-case corpus would never catch this: name != stem with no hostile chars."""
+    root, projects = world
+    d = _memdir(projects, root)
+    (d / "feedback_verify_first.md").write_text(MEMORY.format(
+        name="Verify the fix before claiming it works", desc="verify first", mtype="feedback", body="b"))
+    (d / "MEMORY.md").write_text("# Memory Index\n\n- [verify first](feedback_verify_first.md) — hook\n")
+    store = Store(path=tmp_path / "m.db", writer="test")
+    cs.sync(store, root)
+    files = {p.name for p in d.glob("*.md")}
+    assert files == {"feedback_verify_first.md", "MEMORY.md"}, files
+    assert "(feedback_verify_first.md)" in (d / "MEMORY.md").read_text(encoding="utf-8")
+
+
+def test_the_same_store_under_two_project_keys_is_not_added_to_itself(world, tmp_path):
+    """One directory keyed twice (two machines, one synced folder): 862 == 862, 0 diffs.
+    Reconciling by 'add what the other has' would add every file to itself."""
+    root, projects = world
+    a = _memdir(projects, root)
+    b = _memdir(projects, root / ".worktrees" / "a")   # stands in for the second key
+    for d in (a, b):
+        (d / "shared.md").write_text(MEMORY.format(name="shared", desc="shared fact", mtype="project", body="b"))
+        (d / "MEMORY.md").write_text("# Memory Index\n\n- [shared fact](shared.md) — hook\n")
+    store = Store(path=tmp_path / "m.db", writer="test")
+    result = cs.sync(store, root)
+    for d in (a, b):
+        text = (d / "MEMORY.md").read_text(encoding="utf-8")
+        assert text.count("(shared.md)") == 1, text
+    assert all(r["added"] == [] for r in result["index"].values())
