@@ -178,7 +178,17 @@ def render_memory_file(obs: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-INDEX_BUDGET_BYTES = 25 * 1024   # Claude Code loads only the first 200 lines / 25 KB
+# What the loader actually enforces, read off the shipped binaries
+# (2.1.267 / 268 / 269, identical in all three):
+#
+#     lineCount > 200 || byteCount > 25000
+#
+# with `byteCount: n.length` — a JS string length, i.e. **characters**, not
+# UTF-8 bytes. Measuring bytes overstates a CJK index by ~1.4x and reports an
+# index that loads fine as truncated; measuring only size misses the line cap,
+# which is what a store of short pointer lines hits first.
+INDEX_BUDGET_CHARS = 25_000
+INDEX_BUDGET_LINES = 200
 
 
 def target_filename(obs: dict[str, Any]) -> str:
@@ -247,9 +257,12 @@ def rebuild_index(existing_text: str, observations: Iterable[dict[str, Any]],
         out = [INDEX_HEADER, ""]
     text = "\n".join(out) + "\n"
     unlisted = sorted(t for t in by_target if t not in seen and t not in added)
-    size = len(text.encode("utf-8"))
+    trimmed = text.strip()
+    chars = len(trimmed)
+    lines = trimmed.count("\n") + 1 if trimmed else 0
     return text, {"added": added, "removed": removed, "unlisted": unlisted,
-                  "bytes": size, "over_budget": size > INDEX_BUDGET_BYTES}
+                  "bytes": len(text.encode("utf-8")), "chars": chars, "lines": lines,
+                  "over_budget": chars > INDEX_BUDGET_CHARS or lines > INDEX_BUDGET_LINES}
 
 
 def write_dir(observations: list[dict[str, Any]], memory_dir: "str | Path",

@@ -43,7 +43,7 @@ put it here in a pull request instead.
   breaking change; the round-trip tests must be updated deliberately, never
   loosened to make a diff pass.
 - **`MEMORY.md` is repaired, never regenerated.** It is a curated subset under a
-  25 KB load cap. Refresh existing lines, drop dangling ones, add lines only for
+  200-line / 25,000-character load cap (characters, not UTF-8 bytes). Refresh existing lines, drop dangling ones, add lines only for
   memories this sync brought in from elsewhere, keep everything else in place.
   Deriving one line per file inverts the curation and truncates the tail.
 - **A memory's file is where it was found, never derived from `name`.** On real

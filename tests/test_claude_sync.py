@@ -303,7 +303,39 @@ def test_over_budget_is_reported(world, tmp_path):
     (d / "MEMORY.md").write_text("# Memory Index\n\n" + "".join(f"- [{'d'*200}](m{i}.md)\n" for i in range(120)))
     store = Store(path=tmp_path / "m.db", writer="test")
     rep = cs.sync(store, root)["index"][str(d)]
-    assert rep["over_budget"] is True and rep["bytes"] > cs.INDEX_BUDGET_BYTES
+    assert rep["over_budget"] is True and rep["chars"] > cs.INDEX_BUDGET_CHARS
+
+
+def test_a_cjk_index_is_measured_in_characters_not_utf8_bytes(world, tmp_path):
+    """150 Japanese lines: 27 KB on disk, 9 K characters. The loader takes it whole.
+
+    Measuring ``len(text.encode())`` against the cap called this truncated and
+    sent a curator deleting live memories. The loader counts a JS string length.
+    """
+    root, projects = world
+    d = _memdir(projects, root)
+    desc = "日" * 55
+    for i in range(150):
+        (d / f"m{i}.md").write_text(MEMORY.format(name=f"m{i}", desc=desc, mtype="project", body="b"))
+    (d / "MEMORY.md").write_text("# Memory Index\n\n" + "".join(f"- [{desc}](m{i}.md)\n" for i in range(150)))
+    store = Store(path=tmp_path / "m.db", writer="test")
+    rep = cs.sync(store, root)["index"][str(d)]
+    assert rep["bytes"] > 25 * 1024, "the fixture must be over budget in bytes"
+    assert rep["chars"] < cs.INDEX_BUDGET_CHARS and rep["lines"] <= cs.INDEX_BUDGET_LINES
+    assert rep["over_budget"] is False
+
+
+def test_the_line_cap_is_reported_for_a_short_index(world, tmp_path):
+    """A store of terse pointer lines hits 200 lines long before 25 K characters."""
+    root, projects = world
+    d = _memdir(projects, root)
+    for i in range(240):
+        (d / f"m{i}.md").write_text(MEMORY.format(name=f"m{i}", desc="short", mtype="project", body="b"))
+    (d / "MEMORY.md").write_text("# Memory Index\n\n" + "".join(f"- [s](m{i}.md)\n" for i in range(240)))
+    store = Store(path=tmp_path / "m.db", writer="test")
+    rep = cs.sync(store, root)["index"][str(d)]
+    assert rep["chars"] < cs.INDEX_BUDGET_CHARS
+    assert rep["lines"] > cs.INDEX_BUDGET_LINES and rep["over_budget"] is True
 
 
 

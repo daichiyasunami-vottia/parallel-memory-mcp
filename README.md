@@ -178,7 +178,9 @@ Frontmatter (`name`, `description`, `metadata.type`, `originSessionId`) survives
 the round trip, and files without recognisable frontmatter are left untouched.
 
 **The index is repaired, not regenerated.** `MEMORY.md` is what Claude Code
-injects each session, and it is capped at the first 200 lines / 25 KB. A curated
+injects each session, and it is capped at the first 200 lines or 25,000
+characters — the loader's `byteCount` is a JS string length, so a CJK index
+is measured in characters, not in its (roughly 3x larger) UTF-8 size. A curated
 index is deliberately a subset — on real stores roughly one memory in five has a
 top-level line and the rest are reached through hub notes. Deriving one line
 per file inverts that and, at a few hundred files, produces a 200–400 KB index
@@ -194,7 +196,7 @@ memories are listed. Sync only:
 - keeps every other line verbatim and **in place**: headings, prose, multi-target
   entries, hub notes without frontmatter
 
-Unlisted memories and an index over 25 KB are reported, not acted on. The file a
+Unlisted memories and an index over either cap are reported, not acted on. The file a
 memory lives in is taken from where it was found, never rebuilt from its `name`
 — on real stores `name` differs from the filename in two files out of three and
 sometimes contains `/`, backticks or globs; it is a label, not a path.
